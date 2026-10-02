@@ -1,0 +1,105 @@
+name: Build rock kernel (Image.gz + dtbs) + rtl8188eus module
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      # ROOT_DIR layout required by build.config.common / build.config.rock:
+      #   ROOT_DIR/
+      #     common/                              <- this kernel repo (KERNEL_DIR=common)
+      #     build/                                <- Google's build.sh driver scripts
+      #     build/build-tools/path/linux-x86/      <- BUILDTOOLS_PREBUILT_BIN
+      #     prebuilts-master/clang/host/linux-x86/clang-r416183b/bin/  <- CLANG_PREBUILT_BIN
+      #     vendor/mediatek/kernel_modules/...     <- each EXT_MODULES path
+      #     rtl8188eus/                            <- external module we're adding
+
+      - name: Checkout kernel source as 'common'
+        uses: actions/checkout@v4
+        with:
+          repository: Asmodeus7999/android_kernel_xiaomi_rock
+          ref: android12-5.10
+          path: common
+
+      - name: Clone build.sh driver scripts
+        run: |
+          git clone --depth 1 -b android12-5.10 \
+            https://android.googlesource.com/kernel/build build
+
+      - name: Fetch confirmed Clang prebuilt into expected path
+        run: |
+          mkdir -p prebuilts-master/clang/host/linux-x86
+          cd prebuilts-master/clang/host/linux-x86
+          curl -L -o clang.tar.gz \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r416183b.tar.gz"
+          mkdir -p clang-r416183b
+          tar -xzf clang.tar.gz -C clang-r416183b
+          rm clang.tar.gz
+
+      - name: Clone build-tools into expected path
+        run: |
+          mkdir -p build/build-tools
+          git clone --depth 1 \
+            https://android.googlesource.com/kernel/prebuilts/build-tools \
+            build/build-tools/path
+
+      # NOTE: repo names below follow mediatek-opensource's confirmed naming
+      # pattern (path with "/" -> "-"), but only the wlan/adaptor one has
+      # been directly verified to exist. Check each URL resolves before
+      # relying on this step — 404s here will fail the EXT_MODULES build.
+      - name: Clone MediaTek EXT_MODULES vendor sources
+        run: |
+          set -e
+          declare -A MODS=(
+            ["vendor/mediatek/kernel_modules/gpu"]="vendor-mediatek-kernel_modules-gpu"
+            ["vendor/mediatek/kernel_modules/met_drv_v3"]="vendor-mediatek-kernel_modules-met_drv_v3"
+            ["vendor/mediatek/kernel_modules/connectivity/common"]="vendor-mediatek-kernel_modules-connectivity-common"
+            ["vendor/mediatek/kernel_modules/connectivity/conninfra"]="vendor-mediatek-kernel_modules-connectivity-conninfra"
+            ["vendor/mediatek/kernel_modules/connectivity/connfem"]="vendor-mediatek-kernel_modules-connectivity-connfem"
+            ["vendor/mediatek/kernel_modules/connectivity/wlan/adaptor"]="vendor-mediatek-kernel_modules-connectivity-wlan-adaptor"
+            ["vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m"]="vendor-mediatek-kernel_modules-connectivity-wlan-core-gen4m"
+            ["vendor/mediatek/kernel_modules/connectivity/bt/mt66xx/wmt"]="vendor-mediatek-kernel_modules-connectivity-bt-mt66xx-wmt"
+            ["vendor/mediatek/kernel_modules/connectivity/gps/gps_stp"]="vendor-mediatek-kernel_modules-connectivity-gps-gps_stp"
+            ["vendor/mediatek/kernel_modules/connectivity/gps/data_link/plat/v010"]="vendor-mediatek-kernel_modules-connectivity-gps-data_link-plat-v010"
+            ["vendor/mediatek/kernel_modules/connectivity/gps/data_link/plat/v030"]="vendor-mediatek-kernel_modules-connectivity-gps-data_link-plat-v030"
+            ["vendor/mediatek/kernel_modules/connectivity/gps/data_link/plat/v050"]="vendor-mediatek-kernel_modules-connectivity-gps-data_link-plat-v050"
+            ["vendor/mediatek/kernel_modules/connectivity/gps/gps_pwr"]="vendor-mediatek-kernel_modules-connectivity-gps-gps_pwr"
+            ["vendor/mediatek/kernel_modules/connectivity/gps/gps_scp"]="vendor-mediatek-kernel_modules-connectivity-gps-gps_scp"
+            ["vendor/mediatek/kernel_modules/connectivity/fmradio"]="vendor-mediatek-kernel_modules-connectivity-fmradio"
+          )
+          for path in "${!MODS[@]}"; do
+            repo="${MODS[$path]}"
+            mkdir -p "$path"
+            echo "Cloning mediatek-opensource/${repo} -> ${path}"
+            git clone --depth 1 "https://github.com/mediatek-opensource/${repo}.git" "$path" \
+              || echo "WARNING: ${repo} not found/empty — build may fail on this EXT_MODULE"
+          done
+
+      - name: Checkout rtl8188eus driver as an extra EXT_MODULE
+        uses: actions/checkout@v4
+        with:
+          repository: aircrack-ng/rtl8188eus
+          path: rtl8188eus
+
+      - name: Run official build.sh
+        env:
+          # build.config.rock does: EXT_MODULES="${EXT_MODULES}\n<hardcoded list>"
+          # so pre-setting this appends rtl8188eus to the final list.
+          EXT_MODULES: "rtl8188eus"
+        run: |
+          BUILD_CONFIG=common/build.config.rock build/build.sh
+
+      - name: Collect outputs
+        run: |
+          mkdir -p out
+          find . -path "*/dist/*" \( -name "Image.gz" -o -name "*.dtb" -o -name "*.ko" \) -exec cp {} out/ \; 2>/dev/null || true
+          find . -name "rtl8188eu*.ko" -exec cp {} out/ \;
+          find . -iname "rtl8188eufw*.bin" -exec cp {} out/ \;
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rock-kernel-plus-rtl8188eus-${{ github.sha }}
+          path: out/
